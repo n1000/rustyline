@@ -36,7 +36,7 @@ mod undo;
 pub mod validate;
 
 use std::fmt;
-use std::io::{self, BufRead, Write};
+use std::io::{self, BufRead, Write, BufReader};
 use std::path::Path;
 use std::result;
 use std::sync::{Arc, Mutex, RwLock};
@@ -45,12 +45,12 @@ use log::debug;
 use radix_trie::Trie;
 use unicode_width::UnicodeWidthStr;
 
-use crate::tty::{RawMode, Renderer, Term, Terminal};
+use crate::tty::{RawMode, Renderer, Term, Terminal, InputSrc};
 
 pub use crate::binding::{ConditionalEventHandler, Event, EventContext, EventHandler};
 use crate::completion::{longest_common_prefix, Candidate, Completer};
 pub use crate::config::{
-    ColorMode, CompletionType, Config, EditMode, HistoryDuplicates, OutputStreamType,
+    ColorMode, CompletionType, Config, EditMode, HistoryDuplicates, OutputStreamType, InputSource,
 };
 use crate::edit::State;
 use crate::highlight::Highlighter;
@@ -720,6 +720,7 @@ pub struct Editor<H: Helper> {
     kill_ring: Arc<Mutex<KillRing>>,
     config: Config,
     custom_bindings: Arc<RwLock<Trie<Event, EventHandler>>>,
+    input: BufReader<Box<dyn InputSrc>>,
 }
 
 #[allow(clippy::new_without_default)]
@@ -733,12 +734,18 @@ impl<H: Helper> Editor<H> {
     /// Create an editor with a specific configuration.
     #[must_use]
     pub fn with_config(config: Config) -> Self {
+        let file: Box<dyn InputSrc> = match config.input_source() {
+            InputSource::Stdin => Box::new(io::stdin()),
+            InputSource::Terminal => tty::get_terminal_input_src(),
+        };
+
         let term = Terminal::new(
             config.color_mode(),
             config.output_stream(),
             config.tab_stop(),
             config.bell_style(),
             config.enable_bracketed_paste(),
+            &file,
         );
         Self {
             term,
@@ -747,14 +754,15 @@ impl<H: Helper> Editor<H> {
             kill_ring: Arc::new(Mutex::new(KillRing::new(60))),
             config,
             custom_bindings: Arc::new(RwLock::new(Trie::new())),
+            input: BufReader::new(file),
         }
     }
 
     /// This method will read a line from STDIN and will display a `prompt`.
     ///
-    /// It uses terminal-style interaction if `stdin` is connected to a
+    /// It uses terminal-style interaction if `input` is connected to a
     /// terminal.
-    /// Otherwise (e.g., if `stdin` is a pipe or the terminal is not supported),
+    /// Otherwise (e.g., if `input` is a pipe or the terminal is not supported),
     /// it uses file-style interaction.
     pub fn readline(&mut self, prompt: &str) -> Result<String> {
         self.readline_with(prompt, None)
@@ -779,13 +787,13 @@ impl<H: Helper> Editor<H> {
             stdout.write_all(prompt.as_bytes())?;
             stdout.flush()?;
 
-            readline_direct(io::stdin().lock(), io::stderr(), &self.helper)
-        } else if self.term.is_stdin_tty() {
+            readline_direct(&mut self.input, io::stderr(), &self.helper)
+        } else if self.term.is_input_tty() {
             readline_raw(prompt, initial, self)
         } else {
-            debug!(target: "rustyline", "stdin is not a tty");
+            debug!(target: "rustyline", "input source is not a tty");
             // Not a tty: read from file / pipe.
-            readline_direct(io::stdin().lock(), io::stderr(), &self.helper)
+            readline_direct(&mut self.input, io::stderr(), &self.helper)
         }
     }
 

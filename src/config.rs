@@ -34,6 +34,13 @@ pub struct Config {
     check_cursor_position: bool,
     /// Bracketed paste on unix platform
     enable_bracketed_paste: bool,
+    input_source: InputSource,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum InputSource {
+    Stdin,
+    Terminal,
 }
 
 impl Config {
@@ -192,6 +199,14 @@ impl Config {
     pub fn enable_bracketed_paste(&self) -> bool {
         self.enable_bracketed_paste
     }
+
+    pub fn input_source(&self) -> InputSource {
+        self.input_source
+    }
+
+    pub fn set_input_source(&mut self, input_source: InputSource) {
+        self.input_source = input_source;
+    }
 }
 
 impl Default for Config {
@@ -212,6 +227,7 @@ impl Default for Config {
             indent_size: 2,
             check_cursor_position: false,
             enable_bracketed_paste: true,
+            input_source: InputSource::Stdin,
         }
     }
 }
@@ -447,6 +463,11 @@ impl Builder {
         self
     }
 
+    pub fn input_source(mut self, input_source: InputSource) -> Self {
+        self.set_input_source(input_source);
+        self
+    }
+
     /// Builds a `Config` with the settings specified so far.
     #[must_use]
     pub fn build(self) -> Config {
@@ -561,5 +582,9 @@ pub trait Configurer {
     /// By default, it's enabled.
     fn enable_bracketed_paste(&mut self, enabled: bool) {
         self.config_mut().enable_bracketed_paste = enabled;
+    }
+
+    fn set_input_source(&mut self, input_source: InputSource) {
+        self.config_mut().input_source = input_source;
     }
 }

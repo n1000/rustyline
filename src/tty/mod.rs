@@ -8,6 +8,7 @@ use crate::keys::KeyEvent;
 use crate::layout::{Layout, Position};
 use crate::line_buffer::LineBuffer;
 use crate::{Cmd, Result};
+use std::io::Read;
 
 /// Terminal state
 pub trait RawMode: Sized {
@@ -15,7 +16,7 @@ pub trait RawMode: Sized {
     fn disable_raw_mode(&self) -> Result<()>;
 }
 
-/// Translate bytes read from stdin to keys.
+/// Translate bytes read from input stream to keys.
 pub trait RawReader {
     /// Blocking read of key pressed.
     fn next_key(&mut self, single_esc_abort: bool) -> Result<KeyEvent>;
@@ -199,6 +200,20 @@ fn width(s: &str, esc_seq: &mut u8) -> usize {
     }
 }
 
+#[cfg(unix)]
+use std::os::unix::prelude::AsRawFd;
+#[cfg(unix)]
+pub trait InputSrc: Read + AsRawFd {}
+
+#[cfg(windows)]
+use std::os::windows::prelude::AsRawHandle;
+#[cfg(windows)]
+pub trait InputSrc: Read + AsRawHandle {}
+
+impl InputSrc for std::io::Stdin {}
+
+impl InputSrc for std::fs::File {}
+
 /// Terminal contract
 pub trait Term {
     type KeyMap;
@@ -206,18 +221,19 @@ pub trait Term {
     type Writer: Renderer<Reader = Self::Reader>; // rl_outstream
     type Mode: RawMode;
 
-    fn new(
+    fn new<T: InputSrc + ?Sized>(
         color_mode: ColorMode,
         stream: OutputStreamType,
         tab_stop: usize,
         bell_style: BellStyle,
         enable_bracketed_paste: bool,
+        input: &Box<T>,
     ) -> Self;
     /// Check if current terminal can provide a rich line-editing user
     /// interface.
     fn is_unsupported(&self) -> bool;
-    /// check if stdin is connected to a terminal.
-    fn is_stdin_tty(&self) -> bool;
+    /// check if the input source is connected to a terminal.
+    fn is_input_tty(&self) -> bool;
     /// check if output stream is connected to a terminal.
     fn is_output_tty(&self) -> bool;
     /// Enable RAW mode for the terminal.

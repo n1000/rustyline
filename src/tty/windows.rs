@@ -2,6 +2,7 @@
 #![allow(clippy::try_err)] // suggested fix does not work (cannot infer...)
 
 use std::io::{self, Write};
+use std::fs::File;
 use std::mem;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -22,8 +23,8 @@ use crate::keys::{KeyCode as K, KeyEvent, Modifiers as M};
 use crate::layout::{Layout, Position};
 use crate::line_buffer::LineBuffer;
 use crate::{error, Cmd, Result};
+use crate::tty::InputSrc;
 
-const STDIN_FILENO: DWORD = winbase::STD_INPUT_HANDLE;
 const STDOUT_FILENO: DWORD = winbase::STD_OUTPUT_HANDLE;
 const STDERR_FILENO: DWORD = winbase::STD_ERROR_HANDLE;
 
@@ -75,8 +76,8 @@ pub type Mode = ConsoleMode;
 
 #[derive(Clone, Copy, Debug)]
 pub struct ConsoleMode {
-    original_stdin_mode: DWORD,
-    stdin_handle: HANDLE,
+    original_input_mode: DWORD,
+    input_handle: HANDLE,
     original_stdstream_mode: Option<DWORD>,
     stdstream_handle: HANDLE,
 }
@@ -84,7 +85,7 @@ pub struct ConsoleMode {
 impl RawMode for ConsoleMode {
     /// Disable RAW mode for the terminal.
     fn disable_raw_mode(&self) -> Result<()> {
-        check(unsafe { consoleapi::SetConsoleMode(self.stdin_handle, self.original_stdin_mode) })?;
+        check(unsafe { consoleapi::SetConsoleMode(self.input_handle, self.original_input_mode) })?;
         if let Some(original_stdstream_mode) = self.original_stdstream_mode {
             check(unsafe {
                 consoleapi::SetConsoleMode(self.stdstream_handle, original_stdstream_mode)
@@ -100,8 +101,7 @@ pub struct ConsoleRawReader {
 }
 
 impl ConsoleRawReader {
-    pub fn create() -> Result<ConsoleRawReader> {
-        let handle = get_std_handle(STDIN_FILENO)?;
+    pub fn create(handle: HANDLE) -> Result<ConsoleRawReader> {
         Ok(ConsoleRawReader { handle })
     }
 }
@@ -520,8 +520,8 @@ pub type Terminal = Console;
 
 #[derive(Clone, Debug)]
 pub struct Console {
-    stdin_isatty: bool,
-    stdin_handle: HANDLE,
+    input_isatty: bool,
+    input_handle: HANDLE,
     stdstream_isatty: bool,
     stdstream_handle: HANDLE,
     pub(crate) color_mode: ColorMode,
@@ -541,28 +541,28 @@ impl Console {
     }
 }
 
+pub fn get_terminal_input_src() -> Box<dyn InputSrc> {
+    Box::new(File::options().read(true).write(true).open("CONIN$").unwrap())
+}
+
 impl Term for Console {
     type KeyMap = ConsoleKeyMap;
     type Mode = ConsoleMode;
     type Reader = ConsoleRawReader;
     type Writer = ConsoleRenderer;
 
-    fn new(
+    fn new<T: InputSrc + ?Sized>(
         color_mode: ColorMode,
         stream_type: OutputStreamType,
         _tab_stop: usize,
         bell_style: BellStyle,
         _enable_bracketed_paste: bool,
+        input: &Box<T>
     ) -> Console {
         use std::ptr;
-        let stdin_handle = get_std_handle(STDIN_FILENO);
-        let stdin_isatty = match stdin_handle {
-            Ok(handle) => {
-                // If this function doesn't fail then fd is a TTY
-                get_console_mode(handle).is_ok()
-            }
-            Err(_) => false,
-        };
+        let input_handle = input.as_raw_handle();
+        // If this function doesn't fail then fd is a TTY
+        let input_isatty = get_console_mode(input_handle).is_ok();
 
         let stdstream_handle = get_std_handle(if stream_type == OutputStreamType::Stdout {
             STDOUT_FILENO
@@ -578,8 +578,8 @@ impl Term for Console {
         };
 
         Console {
-            stdin_isatty,
-            stdin_handle: stdin_handle.unwrap_or(ptr::null_mut()),
+            input_isatty,
+            input_handle,
             stdstream_isatty,
             stdstream_handle: stdstream_handle.unwrap_or(ptr::null_mut()),
             color_mode,
@@ -594,8 +594,8 @@ impl Term for Console {
         false
     }
 
-    fn is_stdin_tty(&self) -> bool {
-        self.stdin_isatty
+    fn is_input_tty(&self) -> bool {
+        self.input_isatty
     }
 
     fn is_output_tty(&self) -> bool {
@@ -608,15 +608,15 @@ impl Term for Console {
 
     /// Enable RAW mode for the terminal.
     fn enable_raw_mode(&mut self) -> Result<(ConsoleMode, ConsoleKeyMap)> {
-        if !self.stdin_isatty {
+        if !self.input_isatty {
             Err(io::Error::new(
                 io::ErrorKind::Other,
                 "no stdio handle available for this process",
             ))?;
         }
-        let original_stdin_mode = get_console_mode(self.stdin_handle)?;
+        let original_input_mode = get_console_mode(self.input_handle)?;
         // Disable these modes
-        let mut raw = original_stdin_mode
+        let mut raw = original_input_mode
             & !(wincon::ENABLE_LINE_INPUT
                 | wincon::ENABLE_ECHO_INPUT
                 | wincon::ENABLE_PROCESSED_INPUT);
@@ -625,7 +625,7 @@ impl Term for Console {
         raw |= wincon::ENABLE_INSERT_MODE;
         raw |= wincon::ENABLE_QUICK_EDIT_MODE;
         raw |= wincon::ENABLE_WINDOW_INPUT;
-        check(unsafe { consoleapi::SetConsoleMode(self.stdin_handle, raw) })?;
+        check(unsafe { consoleapi::SetConsoleMode(self.input_handle, raw) })?;
 
         let original_stdstream_mode = if self.stdstream_isatty {
             let original_stdstream_mode = get_console_mode(self.stdstream_handle)?;
@@ -664,8 +664,8 @@ impl Term for Console {
 
         Ok((
             ConsoleMode {
-                original_stdin_mode,
-                stdin_handle: self.stdin_handle,
+                original_input_mode,
+                input_handle: self.input_handle,
                 original_stdstream_mode,
                 stdstream_handle: self.stdstream_handle,
             },
@@ -674,7 +674,7 @@ impl Term for Console {
     }
 
     fn create_reader(&self, _: &Config, _: ConsoleKeyMap) -> Result<ConsoleRawReader> {
-        ConsoleRawReader::create()
+        ConsoleRawReader::create(self.input_handle)
     }
 
     fn create_writer(&self) -> ConsoleRenderer {

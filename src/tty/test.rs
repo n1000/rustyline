@@ -181,7 +181,7 @@ impl Term for DummyTerminal {
         true
     }
 
-    fn is_stdin_tty(&self) -> bool {
+    fn is_input_tty(&self) -> bool {
         true
     }
 
